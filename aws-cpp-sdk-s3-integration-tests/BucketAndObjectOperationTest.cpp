@@ -129,8 +129,8 @@ namespace
             config.scheme = Scheme::HTTPS;
             config.connectTimeoutMs = 30000;
             config.requestTimeoutMs = 30000;
-            config.readRateLimiter = Limiter;
-            config.writeRateLimiter = Limiter;
+            // config.readRateLimiter = Limiter;
+            // config.writeRateLimiter = Limiter;
             config.executor = Aws::MakeShared<Aws::Utils::Threading::PooledThreadExecutor>(ALLOCATION_TAG, 4);
 
             //to use a proxy, uncomment the next two lines.
@@ -141,7 +141,8 @@ namespace
             }
 
 			config.scheme = Aws::Http::Scheme::HTTP;
-			config.endpointOverride = "hivenode01:7480";
+			// config.endpointOverride = "10.124.241.11:80";
+			config.endpointOverride = "compiler:7480";
             Client = Aws::MakeShared<S3Client>(ALLOCATION_TAG, 
                     Aws::MakeShared<DefaultAWSCredentialsProviderChain>(ALLOCATION_TAG), config, 
                         false /*signPayloads*/, false /*useVirtualAddressing*/);
@@ -206,7 +207,10 @@ namespace
             uploadPart1Request.SetPartNumber(partNumber);
             uploadPart1Request.SetUploadId(uploadId);
             uploadPart1Request.SetBody(partStream);
-            uploadPart1Request.SetContentMD5(HashingUtils::Base64Encode(md5OfStream));
+			if (0 != md5OfStream.GetLength())
+			{
+				uploadPart1Request.SetContentMD5(HashingUtils::Base64Encode(md5OfStream));
+			}
 
             auto startingPoint = partStream->tellg();
             partStream->seekg(0LL, partStream->end);
@@ -1014,6 +1018,216 @@ namespace
 		URI uri(presignedUrlPut);
         ASSERT_EQ(0ul, presignedUrlPut.find("http://" + uri.GetAuthority() + ":" + Aws::Utils::StringUtils::to_string(uri.GetPort()) + "/" + fullBucketName + "/" + TEST_DNS_UNFRIENDLY_OBJ_KEY));
     }
+
+	static std::shared_ptr<Aws::StringStream> CreateStreamForUploadPart(uint32_t fiveMbSize, const char* partTag)
+	{
+		// uint32_t fiveMbSize = 5 * 1024 * 1024;
+
+		Aws::StringStream patternStream;
+		patternStream << "Multi-Part upload Test Part " << partTag << ":" << std::endl;
+		Aws::String pattern = patternStream.str();
+
+		Aws::String scratchString;
+		scratchString.reserve(fiveMbSize);
+
+		// 5MB is a hard minimum for multi part uploads; make sure the final string is at least that long
+		uint32_t patternCopyCount = static_cast<uint32_t>(fiveMbSize / pattern.size() + 1);
+		for (uint32_t i = 0; i < patternCopyCount; ++i)
+		{
+			scratchString.append(pattern);
+		}
+
+		std::shared_ptr<Aws::StringStream> streamPtr = Aws::MakeShared<Aws::StringStream>(ALLOCATION_TAG, scratchString);
+
+		streamPtr->seekg(0);
+		streamPtr->seekp(0, std::ios_base::end);
+
+		return streamPtr;
+	}
+
+	TEST_F(BucketAndObjectOperationTest, UploadObject)
+	{
+		Aws::String fullBucketName = "first-bucket";
+		Aws::String objectName = "TestObjectKey1";
+
+		PutObjectRequest putObjectRequest;
+		putObjectRequest.SetBucket(fullBucketName);
+
+		std::shared_ptr<Aws::IOStream> bigStream = CreateStreamForUploadPart((uint32_t)2 * 1024 * 1024 * 1024, "La");
+
+		putObjectRequest.SetBody(bigStream);
+		putObjectRequest.SetContentLength(static_cast<long>(putObjectRequest.GetBody()->tellp()));
+		// putObjectRequest.SetContentMD5(HashingUtils::Base64Encode(HashingUtils::CalculateMD5(*putObjectRequest.GetBody())));
+		putObjectRequest.SetContentType("text/plain");
+		putObjectRequest.SetKey(objectName);
+
+		PutObjectOutcome putObjectOutcome = Client->PutObject(putObjectRequest);
+		ASSERT_TRUE(putObjectOutcome.IsSuccess());
+	}
+
+	TEST_F(BucketAndObjectOperationTest, MultiUploadObject)
+	{
+		Aws::String fullBucketName = "first-bucket";
+		const char* objectName = "TestObjectKey1";
+
+		int nPartSize = 5 * 1024 * 1024;
+
+		CreateMultipartUploadRequest createMultipartUploadRequest;
+		createMultipartUploadRequest.SetBucket(fullBucketName);
+		createMultipartUploadRequest.SetKey(objectName);
+		createMultipartUploadRequest.SetContentType("text/plain");
+
+		CreateMultipartUploadOutcome createMultipartUploadOutcome = Client->CreateMultipartUpload(
+			createMultipartUploadRequest);
+		ASSERT_TRUE(createMultipartUploadOutcome.IsSuccess());
+
+		std::shared_ptr<Aws::IOStream> part1Stream = CreateStreamForUploadPart(nPartSize, "1");
+		// ByteBuffer part1Md5(HashingUtils::CalculateMD5(*part1Stream));
+		UploadPartOutcomeCallable uploadPartOutcomeCallable1 =
+			MakeUploadPartOutcomeAndGetCallable(1, NULL, part1Stream, fullBucketName,
+				objectName, createMultipartUploadOutcome.GetResult().GetUploadId());
+
+		nPartSize = 6 * 1024 * 1024;
+		std::shared_ptr<Aws::IOStream> part2Stream = CreateStreamForUploadPart(nPartSize, "2");
+		// ByteBuffer part2Md5(HashingUtils::CalculateMD5(*part2Stream));
+		UploadPartOutcomeCallable uploadPartOutcomeCallable2 =
+			MakeUploadPartOutcomeAndGetCallable(2, NULL, part2Stream, fullBucketName,
+				objectName,
+				createMultipartUploadOutcome.GetResult().GetUploadId());
+
+		nPartSize = 7 * 1024 * 1024;
+		std::shared_ptr<Aws::IOStream> part3Stream = CreateStreamForUploadPart(nPartSize, "3");
+		// ByteBuffer part3Md5(HashingUtils::CalculateMD5(*part3Stream));
+		UploadPartOutcomeCallable uploadPartOutcomeCallable3 =
+			MakeUploadPartOutcomeAndGetCallable(3, NULL, part3Stream, fullBucketName,
+				objectName,
+				createMultipartUploadOutcome.GetResult().GetUploadId());
+
+		nPartSize = 5 * 1024 * 1024;
+		std::shared_ptr<Aws::IOStream> part4Stream = CreateStreamForUploadPart(nPartSize, "4");
+		// ByteBuffer part4Md5(HashingUtils::CalculateMD5(*part4Stream));
+		UploadPartOutcomeCallable uploadPartOutcomeCallable4 =
+			MakeUploadPartOutcomeAndGetCallable(4, NULL, part4Stream, fullBucketName,
+				objectName,
+				createMultipartUploadOutcome.GetResult().GetUploadId());
+
+		UploadPartOutcome uploadPartOutcome1 = uploadPartOutcomeCallable1.get();
+		UploadPartOutcome uploadPartOutcome2 = uploadPartOutcomeCallable2.get();
+		UploadPartOutcome uploadPartOutcome3 = uploadPartOutcomeCallable3.get();
+		UploadPartOutcome uploadPartOutcome4 = uploadPartOutcomeCallable4.get();
+
+		CompletedPart completedPart1;
+		completedPart1.SetETag(uploadPartOutcome1.GetResult().GetETag());
+		completedPart1.SetPartNumber(1);
+
+		CompletedPart completedPart2;
+		completedPart2.SetETag(uploadPartOutcome2.GetResult().GetETag());
+		completedPart2.SetPartNumber(2);
+
+		CompletedPart completedPart3;
+		completedPart3.SetETag(uploadPartOutcome3.GetResult().GetETag());
+		completedPart3.SetPartNumber(3);
+
+		CompletedPart completedPart4;
+		completedPart4.SetETag(uploadPartOutcome4.GetResult().GetETag());
+		completedPart4.SetPartNumber(4);
+
+		CompleteMultipartUploadRequest completeMultipartUploadRequest;
+		completeMultipartUploadRequest.SetBucket(fullBucketName);
+		completeMultipartUploadRequest.SetKey(objectName);
+		completeMultipartUploadRequest.SetUploadId(createMultipartUploadOutcome.GetResult().GetUploadId());
+
+		CompletedMultipartUpload completedMultipartUpload;
+		completedMultipartUpload.AddParts(completedPart1);
+		completedMultipartUpload.AddParts(completedPart2);
+		completedMultipartUpload.AddParts(completedPart3);
+		completedMultipartUpload.AddParts(completedPart4);
+		completeMultipartUploadRequest.WithMultipartUpload(completedMultipartUpload);
+
+		CompleteMultipartUploadOutcome completeMultipartUploadOutcome = Client->CompleteMultipartUpload(
+			completeMultipartUploadRequest);
+		ASSERT_TRUE(completeMultipartUploadOutcome.IsSuccess());
+	}
+
+	TEST_F(BucketAndObjectOperationTest, GetObjectSequence)
+	{
+		Aws::String fullBucketName = "first-bucket";
+		Aws::String objectName = "TestObjectKey";
+
+		HeadObjectRequest headObjectRequest;
+		headObjectRequest.SetBucket(fullBucketName);
+		headObjectRequest.SetKey(objectName);
+		HeadObjectOutcome headObjectOutcome = Client->HeadObject(headObjectRequest);
+		ASSERT_TRUE(headObjectOutcome.IsSuccess());
+
+		__int64 n64ObjectLength = headObjectOutcome.GetResult().GetContentLength();
+
+		__int64 n64StepSize = 8 * 1024 * 1024;
+		__int64 n64StartRange = 0;
+		__int64 n64EndRange = 0;
+		char szRange[30] = { 0 };
+
+		while (n64StartRange < n64ObjectLength)
+		{
+			n64EndRange = n64StartRange + n64StepSize - 1;
+			if (n64EndRange > (n64ObjectLength - 1))
+			{
+				n64EndRange = n64ObjectLength - 1;
+			}
+
+			sprintf_s(szRange, sizeof(szRange), "bytes=%I64d-%I64d", n64StartRange, n64EndRange);
+
+			GetObjectRequest getObjectRequest;
+			getObjectRequest.SetBucket(fullBucketName);
+			getObjectRequest.SetKey(objectName);
+			getObjectRequest.SetRange(szRange);
+
+			GetObjectOutcome getObjectOutcome = Client->GetObject(getObjectRequest);
+			ASSERT_TRUE(getObjectOutcome.IsSuccess());
+
+			n64StartRange = n64EndRange + 1;
+		}
+	}
+
+	TEST_F(BucketAndObjectOperationTest, GetObjectRandom)
+	{
+		Aws::String fullBucketName = "first-bucket";
+		Aws::String objectName = "TestObjectKey";
+
+		HeadObjectRequest headObjectRequest;
+		headObjectRequest.SetBucket(fullBucketName);
+		headObjectRequest.SetKey(objectName);
+		HeadObjectOutcome headObjectOutcome = Client->HeadObject(headObjectRequest);
+		ASSERT_TRUE(headObjectOutcome.IsSuccess());
+
+		__int64 n64ObjectLength = headObjectOutcome.GetResult().GetContentLength();
+
+		__int64 n64StepSize = 300 * 1024;
+		__int64 n64StartRange = 0;
+		__int64 n64EndRange = 0;
+		char szRange[30] = { 0 };
+		unsigned __int64 n64RandomPos = 0;
+
+		srand((unsigned)time(NULL));
+
+		for (int i = 0; i < 1000; i++)
+		{
+			n64RandomPos = (unsigned __int64)RAND_MAX*rand() + rand();
+
+			n64StartRange = n64RandomPos % (n64ObjectLength - n64StepSize + 1);
+			n64EndRange = n64StartRange + n64StepSize - 1;
+
+			sprintf_s(szRange, sizeof(szRange), "bytes=%I64d-%I64d", n64StartRange, n64EndRange);
+
+			GetObjectRequest getObjectRequest;
+			getObjectRequest.SetBucket(fullBucketName);
+			getObjectRequest.SetKey(objectName);
+			getObjectRequest.SetRange(szRange);
+
+			GetObjectOutcome getObjectOutcome = Client->GetObject(getObjectRequest);
+			ASSERT_TRUE(getObjectOutcome.IsSuccess());
+		}
+	}
 }
 
 

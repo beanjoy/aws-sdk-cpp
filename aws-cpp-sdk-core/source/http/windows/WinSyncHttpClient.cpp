@@ -99,22 +99,24 @@ bool WinSyncHttpClient::StreamPayloadToRequest(const HttpRequest& request, void*
 {
     bool success = true;
     auto payloadStream = request.GetContentBody();
+	int nBufSize = 8 * 1024 * 1024;
+	char *pBuf = new char[nBufSize];
     if(payloadStream)
     {
         auto startingPos = payloadStream->tellg();
 
-        char streamBuffer[ HTTP_REQUEST_WRITE_BUFFER_LENGTH ];
+        // char streamBuffer[ HTTP_REQUEST_WRITE_BUFFER_LENGTH ];
         bool done = false;
         while(success && !done)
         {            
-            payloadStream->read(streamBuffer, HTTP_REQUEST_WRITE_BUFFER_LENGTH);
+            payloadStream->read(pBuf, nBufSize);
             std::streamsize bytesRead = payloadStream->gcount();
             success = !payloadStream->bad();
             
             uint64_t bytesWritten = 0;
             if (bytesRead > 0)
             {
-                bytesWritten = DoWriteData(hHttpRequest, streamBuffer, bytesRead);
+                bytesWritten = DoWriteData(hHttpRequest, pBuf, bytesRead);
                 if (!bytesWritten)
                 {                    
                     success = false;
@@ -142,6 +144,12 @@ bool WinSyncHttpClient::StreamPayloadToRequest(const HttpRequest& request, void*
         payloadStream->clear();
         payloadStream->seekg(startingPos, payloadStream->beg);
     }
+
+	if (pBuf)
+	{
+		delete[] pBuf;
+		pBuf = NULL;
+	}
 
     if(success)
     {
@@ -208,16 +216,19 @@ std::shared_ptr<HttpResponse> WinSyncHttpClient::BuildSuccessResponse(const Aws:
 
     if (request.GetMethod() != HttpMethod::HTTP_HEAD)
     {
-        char body[1024];
-        uint64_t bodySize = sizeof(body);
+        // char body[1024];
+        // uint64_t bodySize = sizeof(body);
         int64_t numBytesResponseReceived = 0;
         read = 0;    
         
+		__int64 nBufSize = 8 * 1024 * 1024;
+		char *pBuf = new char[(int)nBufSize];
+
         bool success = ContinueRequest(request);
 
-        while (DoReadData(hHttpRequest, body, bodySize, read) && read > 0 && success)
+        while (DoReadData(hHttpRequest, pBuf, nBufSize, read) && read > 0 && success)
         {
-            response->GetResponseBody().write(body, read);
+            response->GetResponseBody().write(pBuf, read);
             if (read > 0)
             {
                 numBytesResponseReceived += read;
@@ -234,6 +245,12 @@ std::shared_ptr<HttpResponse> WinSyncHttpClient::BuildSuccessResponse(const Aws:
 
             success = success && ContinueRequest(request) && IsRequestProcessingEnabled();
         }
+
+		if (pBuf)
+		{
+			delete[] pBuf;
+			pBuf = NULL;
+		}
 
         if (response->HasHeader(Aws::Http::CONTENT_LENGTH_HEADER))
         {
